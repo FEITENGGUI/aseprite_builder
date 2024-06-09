@@ -59,6 +59,7 @@ jobs:
   build-aseprite:
     name: Build Aseprite
     needs: check-version
+    if: ${{ needs.check-version.outputs.upload_url }}
     runs-on: ${{ matrix.os }}
     strategy:
        matrix:
