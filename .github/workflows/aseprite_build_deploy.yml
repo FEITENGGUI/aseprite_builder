@@ -23,7 +23,7 @@ jobs:
     - name: Get latest version info
       id: version_info
       run: |
-        data=$(curl -sL https://api.github.com/repos/aseprite/aseprite/releases/tags/v1.3.6)
+        data=$(curl -sL https://api.github.com/repos/aseprite/aseprite/releases/latest)
         LATEST_TAG=$(echo "${data}" | jq -r '.tag_name')
         DOWNLOAD_URL=$(echo "${data}" | jq -r '.assets[].browser_download_url')
         VERSION_INFO=$(echo "${data}" | jq -r '.body')
@@ -124,7 +124,7 @@ jobs:
         working-directory: aseprite/build/bin
         run: 7z -tzip a Aseprite-${{ needs.check-version.outputs.latest_tag }}-${{ runner.os }}.zip *
       - name: Upload release
-        uses: actions/upload-release-asset@v1
+        uses: actions/upload-release-asset@v1.0.1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
