@@ -19,7 +19,8 @@ jobs:
       - name: Get latest version info
         id: version_info
         run: |
-          data=$(curl -sL https://api.github.com/repos/aseprite/aseprite/releases/latest)
+          data=$(curl -sL -H "Authorization: token ${{ secrets.RELEASE_TOKEN }}" \
+                     https://api.github.com/repos/aseprite/aseprite/releases/latest)
           LATEST_TAG=$(echo "${data}" | jq -r '.tag_name')
           DOWNLOAD_URL=$(echo "${data}" | jq -r '.assets[] | select(.name | test("Source")) | .browser_download_url' | head -n1)
           
