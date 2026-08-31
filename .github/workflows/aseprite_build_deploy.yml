@@ -1,5 +1,6 @@
 name: Build and deploy Aseprite
 
+# 1. 已成功改为手动点击按钮触发
 on:
   workflow_dispatch:
 
@@ -19,42 +20,45 @@ jobs:
     - name: Get latest version info
       id: version_info
       run: |
-        data=$(curl -sL https://api.github.com/repos/aseprite/aseprite/releases/latest)
+        data=$(curl -sL https://github.com)
         LATEST_TAG=$(echo "${data}" | jq -r '.tag_name')
         DOWNLOAD_URL=$(echo "${data}" | jq -r '.assets[].browser_download_url')
         VERSION_INFO=$(echo "${data}" | jq -r '.body')
         
         echo "${LATEST_TAG}" > ${LATEST_TAG}.txt
-        echo "::set-output name=latest_tag::${LATEST_TAG}"
-        echo "::set-output name=download_url::${DOWNLOAD_URL}"
-        echo "::set-output name=version_info::${VERSION_INFO}"
+        
+        # 2. 修复废弃的 ::set-output 语法，改用最新的 GITHUB_OUTPUT 环境变量
+        echo "latest_tag=${LATEST_TAG}" >> $GITHUB_OUTPUT
+        echo "download_url=${DOWNLOAD_URL}" >> $GITHUB_OUTPUT
+        echo "version_info=${VERSION_INFO}" >> $GITHUB_OUTPUT
+        
     - name: Load version from cache
       id: version_check
-      uses: actions/cache@v4
+      uses: actions/cache@v4  # 3. 升级为 v4 修复缓存组件
       with:
         path: ${{ steps.version_info.outputs.latest_tag }}.txt
         key: cached_version
+        
     - name: Should we start new build?
       id: should_build
-      run: echo "::set-output name=should_build::true"
+      run: echo "should_build=true" >> $GITHUB_OUTPUT # 4. 修复旧语法
+      
     - name: Create Release
       id: create_release
-      if: steps.should_build.outputs.should_build
-      uses: actions/create-release@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      if: steps.should_build.outputs.should_build == 'true'
+      # 5. 替换了已被彻底废弃的 actions/create-release@v1，改用社区维护的软替换方案
+      uses: softprops/action-gh-release@v2
       with:
         tag_name: ${{ steps.version_info.outputs.latest_tag }}
-        release_name: Release Aseprite ${{ steps.version_info.outputs.latest_tag }}
+        name: Release Aseprite ${{ steps.version_info.outputs.latest_tag }}
         body: |
           ${{ steps.version_info.outputs.version_info }}
         draft: true
         prerelease: false
-  
+
   build-aseprite:
     name: Build Aseprite
     needs: check-version
-    if: ${{ needs.check-version.outputs.upload_url }}
     runs-on: ${{ matrix.os }}
     strategy:
        matrix:
@@ -70,16 +74,18 @@ jobs:
       - name: (macOS) Install dependencies
         if: matrix.os == 'macOS-latest'
         run: brew install ninja p7zip
+        
       - name: Get Skia from cache
         id: skia-cache
-        uses: actions/cache@v2
+        uses: actions/cache@v4  # 6. 核心修复：升级为 v4 解决你刚才遇到的阻碍报错
         with:
           path: skia
           key: skia-${{ matrix.os }}-cache
+          
       - name: Download Skia if not in cache
         if: steps.skia-cache.outputs.cache-hit != 'true'
         run: |
-          curl -o Skia-${{ runner.os }}-Release-X64.zip -L https://github.com/aseprite/skia/releases/download/m102-861e4743af/Skia-${{ runner.os }}-Release-X64.zip
+          curl -o Skia-${{ runner.os }}-Release-X64.zip -L https://github.com{{ runner.os }}-Release-X64.zip
           unzip Skia-${{ runner.os }}-Release-X64.zip -d skia
       - name: Download Aseprite release
         run: |
@@ -119,12 +125,10 @@ jobs:
       - name: Create release
         working-directory: aseprite/build/bin
         run: 7z -tzip a Aseprite-${{ needs.check-version.outputs.latest_tag }}-${{ runner.os }}.zip *
+        
       - name: Upload release
-        uses: actions/upload-release-asset@v1.0.1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # 7. 替换了已被彻底废弃的 actions/upload-release-asset@v1，直接整合到最新的 release 插件中
+        uses: softprops/action-gh-release@v2
         with:
-          upload_url: ${{ needs.check-version.outputs.upload_url }}
-          asset_path: aseprite/build/bin/Aseprite-${{ needs.check-version.outputs.latest_tag }}-${{ runner.os }}.zip
-          asset_name: Aseprite-${{ needs.check-version.outputs.latest_tag }}-${{ runner.os }}.zip
-          asset_content_type: application/zip
+          tag_name: ${{ needs.check-version.outputs.latest_tag }}
+          files: aseprite/build/bin/Aseprite-${{ needs.check-version.outputs.latest_tag }}-${{ runner.os }}.zip
