@@ -1,12 +1,11 @@
 name: Build and deploy Aseprite
 
-# 1. 已成功改为手动点击按钮触发
 on:
   workflow_dispatch:
 
 env:
   BUILD_TYPE: Release
-  
+
 jobs:
   check-version:
     name: Check latest Aseprite release
@@ -14,121 +13,150 @@ jobs:
     outputs:
       download_url: ${{ steps.version_info.outputs.download_url }}
       latest_tag: ${{ steps.version_info.outputs.latest_tag }}
+      version_info: ${{ steps.version_info.outputs.version_info }}
       should_build: ${{ steps.should_build.outputs.should_build }}
-      upload_url: ${{ steps.create_release.outputs.upload_url }}
     steps:
-    - name: Get latest version info
-      id: version_info
-      run: |
-        data=$(curl -sL https://github.com)
-        LATEST_TAG=$(echo "${data}" | jq -r '.tag_name')
-        DOWNLOAD_URL=$(echo "${data}" | jq -r '.assets[].browser_download_url')
-        VERSION_INFO=$(echo "${data}" | jq -r '.body')
-        
-        echo "${LATEST_TAG}" > ${LATEST_TAG}.txt
-        
-        # 2. 修复废弃的 ::set-output 语法，改用最新的 GITHUB_OUTPUT 环境变量
-        echo "latest_tag=${LATEST_TAG}" >> $GITHUB_OUTPUT
-        echo "download_url=${DOWNLOAD_URL}" >> $GITHUB_OUTPUT
-        echo "version_info=${VERSION_INFO}" >> $GITHUB_OUTPUT
-        
-    - name: Load version from cache
-      id: version_check
-      uses: actions/cache@v4  # 3. 升级为 v4 修复缓存组件
-      with:
-        path: ${{ steps.version_info.outputs.latest_tag }}.txt
-        key: cached_version
-        
-    - name: Should we start new build?
-      id: should_build
-      run: echo "should_build=true" >> $GITHUB_OUTPUT # 4. 修复旧语法
-      
-    - name: Create Release
-      id: create_release
-      if: steps.should_build.outputs.should_build == 'true'
-      # 5. 替换了已被彻底废弃的 actions/create-release@v1，改用社区维护的软替换方案
-      uses: softprops/action-gh-release@v2
-      with:
-        tag_name: ${{ steps.version_info.outputs.latest_tag }}
-        name: Release Aseprite ${{ steps.version_info.outputs.latest_tag }}
-        body: |
-          ${{ steps.version_info.outputs.version_info }}
-        draft: true
-        prerelease: false
+      - name: Get latest version info
+        id: version_info
+        run: |
+          data=$(curl -sL https://api.github.com/repos/aseprite/aseprite/releases/latest)
+          LATEST_TAG=$(echo "${data}" | jq -r '.tag_name')
+          DOWNLOAD_URL=$(echo "${data}" | jq -r '.assets[] | select(.name | test("Source")) | .browser_download_url' | head -n1)
+          
+          # 使用 heredoc 安全处理多行内容
+          {
+            echo "latest_tag=${LATEST_TAG}"
+            echo "download_url=${DOWNLOAD_URL}"
+            echo "version_info<<EOF"
+            echo "${data}" | jq -r '.body'
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Load version from cache
+        id: version_check
+        uses: actions/cache@v4
+        with:
+          path: version_marker.txt
+          key: aseprite-version-${{ steps.version_info.outputs.latest_tag }}
+
+      - name: Should we start new build?
+        id: should_build
+        run: |
+          if [ "${{ steps.version_check.outputs.cache-hit }}" != "true" ]; then
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            echo "${{ steps.version_info.outputs.latest_tag }}" > version_marker.txt
+          else
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+          fi
 
   build-aseprite:
     name: Build Aseprite
     needs: check-version
+    if: needs.check-version.outputs.should_build == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
-       matrix:
-         os: [windows-latest]
-       fail-fast: false    
+      matrix:
+        os: [windows-latest]
+      fail-fast: false
     steps:
-      - name: (Windows) Install dependencies
+      - name: (Windows) Install Ninja
         if: matrix.os == 'windows-latest'
         uses: seanmiddleditch/gha-setup-ninja@master
+
       - name: (Ubuntu) Install dependencies
         if: matrix.os == 'ubuntu-latest'
         run: sudo apt install -y cmake ninja-build libxcursor-dev libxi-dev libgl1-mesa-dev
+
       - name: (macOS) Install dependencies
-        if: matrix.os == 'macOS-latest'
+        if: matrix.os == 'macos-latest'
         run: brew install ninja p7zip
-        
+
       - name: Get Skia from cache
         id: skia-cache
-        uses: actions/cache@v4  # 6. 核心修复：升级为 v4 解决你刚才遇到的阻碍报错
+        uses: actions/cache@v4
         with:
           path: skia
-          key: skia-${{ matrix.os }}-cache
-          
+          key: skia-${{ matrix.os }}-m102
+
       - name: Download Skia if not in cache
         if: steps.skia-cache.outputs.cache-hit != 'true'
         run: |
-          curl -o Skia-${{ runner.os }}-Release-X64.zip -L https://github.com{{ runner.os }}-Release-X64.zip
+          curl -o Skia-${{ runner.os }}-Release-X64.zip -L \
+            https://github.com/aseprite/skia/releases/download/m102-861e4743af/Skia-${{ runner.os }}-Release-X64.zip
           unzip Skia-${{ runner.os }}-Release-X64.zip -d skia
-      - name: Download Aseprite release
+
+      - name: Download Aseprite source
         run: |
-          curl -o Aseprite-source.zip -L ${{ needs.check-version.outputs.download_url }}
+          curl -o Aseprite-source.zip -L "${{ needs.check-version.outputs.download_url }}"
           unzip Aseprite-source.zip -d aseprite
           mkdir -p aseprite/build
-      - name: (Windows) Set architecture for the produced binary
-        if: matrix.os == 'windows-latest'
-        shell: cmd
-        run: call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=x64
-      - name: (Windows) Setting Visual Studio build environment variables and paths
+
+      - name: (Windows) Set up Visual Studio environment
         if: matrix.os == 'windows-latest'
         uses: seanmiddleditch/gha-setup-vsdevenv@master
+
       - name: (Windows) Run CMake
         if: matrix.os == 'windows-latest'
         working-directory: aseprite/build
         shell: cmd
-        run: cmake -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} -DCMAKE_IGNORE_PATH='C:/ProgramData/chocolatey/bin/;C:/Strawberry/c/bin/' -DLAF_BACKEND=skia -DSKIA_DIR=../../skia -DSKIA_LIBRARY_DIR=../../skia/out/Release-x64 -G Ninja ..
+        run: |
+          cmake -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} ^
+            -DCMAKE_IGNORE_PATH="C:/ProgramData/chocolatey/bin/;C:/Strawberry/c/bin/" ^
+            -DLAF_BACKEND=skia ^
+            -DSKIA_DIR=../../skia ^
+            -DSKIA_LIBRARY_DIR=../../skia/out/Release-x64 ^
+            -G Ninja ..
+
       - name: (Ubuntu) Run CMake
         if: matrix.os == 'ubuntu-latest'
         working-directory: aseprite/build
-        run: cmake -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} -DLAF_BACKEND=skia -DSKIA_DIR=../../skia -DSKIA_LIBRARY_DIR=../../skia/out/Release-x64 -G Ninja ..
+        run: |
+          cmake -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
+            -DLAF_BACKEND=skia \
+            -DSKIA_DIR=../../skia \
+            -DSKIA_LIBRARY_DIR=../../skia/out/Release-x64 \
+            -G Ninja ..
+
       - name: (macOS) Run CMake
-        if: matrix.os == 'macOS-latest'
+        if: matrix.os == 'macos-latest'
         working-directory: aseprite/build
-        run: cmake -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} -DCMAKE_OSX_ARCHITECTURES=x86_64 -DCMAKE_OSX_DEPLOYMENT_TARGET=10.9 -DCMAKE_OSX_SYSROOT=/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX10.15.sdk -DLAF_BACKEND=skia -DSKIA_DIR=../../skia -DSKIA_LIBRARY_DIR=../../skia/out/Release-x64 -G Ninja ..
-      - name: Run Ninja
+        run: |
+          cmake -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
+            -DCMAKE_OSX_ARCHITECTURES=x86_64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=10.9 \
+            -DLAF_BACKEND=skia \
+            -DSKIA_DIR=../../skia \
+            -DSKIA_LIBRARY_DIR=../../skia/out/Release-x64 \
+            -G Ninja ..
+
+      - name: Build with Ninja
         working-directory: aseprite/build
         run: ninja aseprite
-      - name: Clean up build
+
+      - name: Clean up build artifacts
         working-directory: aseprite/build/bin
         shell: bash
         run: rm -f gen modp_b64_gen gen.exe gen.exe.manifest modp_b64_gen.exe modp_b64_gen.exe.manifest
-      - name: (Windows) Make portable zip
+
+      - name: (Windows) Create portable marker
+        if: matrix.os == 'windows-latest'
         working-directory: aseprite/build/bin
+        shell: bash
         run: echo '# This file is here so Aseprite behaves as a portable program' > aseprite.ini
-      - name: Create release
+
+      - name: Package release zip
         working-directory: aseprite/build/bin
-        run: 7z -tzip a Aseprite-${{ needs.check-version.outputs.latest_tag }}-${{ runner.os }}.zip *
-        
-      - name: Upload release
-        # 7. 替换了已被彻底废弃的 actions/upload-release-asset@v1，直接整合到最新的 release 插件中
+        shell: bash
+        run: 7z -tzip a "Aseprite-${{ needs.check-version.outputs.latest_tag }}-${{ runner.os }}.zip" *
+
+      - name: Upload Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.check-version.outputs.latest_tag }}
+          name: Release Aseprite ${{ needs.check-version.outputs.latest_tag }}
+          body: ${{ needs.check-version.outputs.version_info }}
+          draft: true
+          prerelease: false
           files: aseprite/build/bin/Aseprite-${{ needs.check-version.outputs.latest_tag }}-${{ runner.os }}.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
